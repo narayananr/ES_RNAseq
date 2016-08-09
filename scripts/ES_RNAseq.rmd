@@ -1,0 +1,727 @@
+---
+title: "ES Cell RNASeq Analysis of 8 strains"
+author: "Narayanan Raghupathy"
+date: "July 6, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### R Libraries and Data Import
+Let us load the R packagesneeded for the differential expression analysis by DESEQ2.
+
+```{r R_package, results='hide', message=FALSE, warning=FALSE}
+library("DESeq2")
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(knitr)
+library(sva)
+library("AnnotationDbi")
+library("org.Mm.eg.db")
+library(pathview)
+library(gage)
+library(gageData)
+library(pheatmap)
+```
+
+Let us load the quantified expression data and the experimental design for all the 8 strains (B6,NOD, PWD, CAST, WSB,NZO,AJ,and 129S1).
+
+```{r data}
+exp_with_gene_info = read.csv("~/Work/Projects/Laura/ES_RNAseq/EMASE/ES_RNAseq_CC_Founders_R84-REL1505_EMASE_pe_counts.tsv", sep="\t")
+exp_design = read.table("~/Work/Projects/Laura/ES_RNAseq/EMASE/ES_RNAseq_cell_line_CCF_exp_design.tsv", header=FALSE)
+colnames(exp_design)=c("sampleID","cell_line","strain")
+thres= 10000 
+gene_info=exp_with_gene_info[,1:6]
+print(head(gene_info))
+exp = exp_with_gene_info[,-(1:6)]
+rownames(exp)=as.vector(gene_info[,1])
+s_names= gsub("_agouti","",colnames(exp))
+s_names= gsub("_1_","_",s_names)
+s_names= gsub("_2_","_",s_names)
+s_names= gsub("_3_","_",s_names)
+s_names= gsub("_4_","_",s_names)
+s_names= gsub("X","",s_names)
+s_names= as.vector(sapply(s_names, function(x){ 
+  y=strsplit(x,"_")[[1]]; 
+  if (length(y)>3){
+    paste0(y[[1]],"_",y[[2]],"_",y[[3]])
+    }
+  else{
+    paste0(y[[1]],"_",y[[2]])
+    }}))
+all(s_names==as.vector(exp_design[,1]))
+colnames(exp_with_gene_info)=c(c(c("Gene_ID","Gene_Symbol"),colnames(gene_info[,3:6])),s_names)
+colnames(exp_with_gene_info)
+exp_with_gene_info[1:5,1:10]
+write.table(exp_with_gene_info,"~/Work/Projects/Laura/ES_RNAseq/EMASE/ES_RNAseq_R84-REL1505_EMASE_pe_counts.tsv", row.names=FALSE, quote=FALSE,col.names=TRUE,sep="\t")
+write.table(exp_design,"~/Work/Projects/Laura/ES_RNAseq/EMASE/ES_RNAseq_sample_info.tsv", row.names=FALSE, quote=FALSE,col.names=TRUE,sep="\t")
+exp_nz = exp[rowSums(exp)>thres,]
+colnames(exp_nz)=s_names
+strains=exp_design$strain
+```
+```{r pluri_genes}
+pluri_markers=c("Pou5f1","Sox2","Nanog",
+                "Klf2","Esrrb","Dppa3")
+diff_markers=c("Otx2","Fgf5","Eomes","Cer1","Foxa2",
+               "Map2","Dcx","Nefl","Nefm","Isl1","Prph")
+pluri_ind= which(as.vector(exp_with_gene_info$Gene_Symbol)  %in% pluri_markers)
+pluri_ind
+diff_ind= which(as.vector(exp_with_gene_info$Gene_Symbol)  %in% diff_markers)
+diff_ind
+pluri_exp= exp_with_gene_info[pluri_ind,]
+diff_exp= exp_with_gene_info[diff_ind,]
+dim(pluri_exp)
+dim(diff_exp)
+pluri_exp[1:5,7:ncol(pluri_exp)][1:5,1:5]
+pluri_log2_counts  <- t(apply(pluri_exp[,7:ncol(pluri_exp)], 1, function(x){log2(x+1)}))
+strains=as.vector(sapply(colnames(pluri_exp[,7:ncol(pluri_exp)]),function(x){strsplit(x,"_")[[1]][[1]]}))
+colnames(pluri_log2_counts)=strains
+
+pheatmap(pluri_log2_counts, cluster_rows=FALSE,show_rownames=FALSE,
+         cluster_cols=FALSE, show_colnames = TRUE)
+
+diff_log2_counts  <- t(apply(diff_exp[,7:ncol(pluri_exp)], 1, function(x){log2(x+1)}))
+strains=as.vector(sapply(colnames(diff_exp[,7:ncol(pluri_exp)]),function(x){strsplit(x,"_")[[1]][[1]]}))
+colnames(diff_log2_counts)=strains
+
+pheatmap(diff_log2_counts, cluster_rows=FALSE,show_rownames=FALSE,
+         cluster_cols=FALSE, show_colnames = TRUE)
+
+```
+
+
+```{r gene_info}
+gene_info =read.table("/Users/narayan/Work/Projects/Laura/ES_RNAseq/EMASE/ENSMUSG-gene-info-R84.tsv", header=F)
+head(gene_info)
+get_gene_name<-function(ensID,gene_df){
+  g_ind = which(as.vector(gene_df[,1])==ensID)
+  g_name = gene_df[g_ind,2]
+  return(g_name)
+}
+get_gene_info<-function(ensID,gene_df){
+  g_ind = which(as.vector(gene_df[,1])==ensID)
+  print(g_ind)
+  ensID= as.vector(gene_df[g_ind,1])
+  gName= as.vector(gene_df[g_ind,2])
+  chro = as.vector(gene_df[g_ind,3])
+  start = as.vector(gene_df[g_ind,5])
+  end = as.vector(gene_df[g_ind,6])
+  g_name = paste0(ensID,": ",gName," Chr",chro,"-",start,":",end)
+  return(g_name)
+}
+```
+
+### Alignment summary
+
+The RNA-seq data were aligned to strain-specific transcriptomes and expression abundance estimates for each transcript was obtained using EMASE.
+```{r alignment_summary}
+read_counts = read.table("/Users/narayan/Work/Projects/Laura/ES_RNAseq/EMASE/bowtie_PE_R84-REL1505_read_count_stats.tsv")
+colnames(read_counts)=c("samples","total_R1","aligned_R1","total_R2","aligned_R2")
+nygc_info = read.table("/Users/narayan/Work/Projects/Laura/ES_RNAseq/EMASE/ES_RNAseq_CC_Founders_NYGC.txt", header=T)
+strain_info =cbind(as.vector(nygc_info$sID),as.vector(nygc_info$Strain))
+dim(strain_info)
+sID_strain=apply(strain_info,1,function(x){paste0(x[2],"_",x[1])})
+ind=match(nygc_info$sID,as.vector(read_counts$samples))
+ES_samples=as.vector(read_counts$samples)
+ES_samples[ind]=sID_strain
+read_counts$samples=ES_samples
+align_stats=data.frame(samples=read_counts$samples,
+                  total= (read_counts$total_R1+
+                                read_counts$total_R2)/2,
+                  aligned=(read_counts$aligned_R1+
+                             read_counts$aligned_R2)/2)
+dim(align_stats)
+percent_aligned = align_stats$aligned/align_stats$total
+qplot(percent_aligned)
+strains=as.vector(sapply(as.vector(align_stats$samples),function(x){strsplit(x,"_")[[1]][[1]]}))
+head(align_stats)
+align_stats$strain<-strains
+align_per=data.frame(samples=read_counts$samples,
+                           percent_aligned=percent_aligned,
+                           strain=strains)
+head(align_per)
+#pdf("ES_RNA_seq_8strains_percent_aligned.pdf",width=12,height=10)
+gg_box_pc <- ggplot(align_per,aes(x=strain,y=percent_aligned,fill=strain))+theme_bw()
+gg_box_pc <- gg_box_pc+geom_boxplot()+geom_point(position=position_jitter(width=0.2))
+gg_box_pc <- gg_box_pc+theme(axis.text=element_text(size=20),
+         axis.title=element_text(size=20,face="bold"))
+print(gg_box_pc)
+#dev.off()
+```
+
+### Effect of Cell Lines on B6
+Get data for B6 alone 
+```{r B6_cell_line_effect_data}
+B6_ind = which(exp_design$strain=="B6")
+all_exp =read.csv("~/Work/Projects/Laura/ES_RNAseq/EMASE/ES_RNAseq_R84-REL1505_EMASE_pe_counts.tsv",sep="\t")
+all_exp[1:5,1:15]
+colnames(all_exp)
+B6_exp=all_exp[,-(1:6)][,B6_ind]
+rownames(B6_exp)=as.vector(all_exp$Gene_ID)
+#B6_exp[1:5,1:5]
+#### replace dot in colnames
+bio_reps=gsub("\\.1","",colnames(B6_exp))
+bio_reps=gsub("\\.2","",bio_reps)
+bio_reps=gsub("\\.3","",bio_reps)
+bio_reps
+#### collapse techincal replicates in B6 expression
+B6_bio_rep_exp = t(apply(B6_exp,1,
+                        function(x){aggregate(as.numeric(x),                                          by=list(bio_reps),FUN=sum)$x}))
+#head(B6_bio_rep_exp)
+colnames(B6_bio_rep_exp)=aggregate(as.numeric(B6_exp[1,]), by=list(bio_reps),FUN=sum)$Group.1
+head(B6_bio_rep_exp)
+thres=100
+nzIndex_B6 = as.vector(which(apply(B6_bio_rep_exp,1,function(x){sum(x>thres)/length(x)})>=0.33))
+B6_rep_exp_nz= B6_bio_rep_exp[nzIndex_B6,]
+#dim(B6_rep_exp_nz)
+#colnames(B6_bio_rep_exp)
+#head(B6_rep_exp_nz)
+cell_line_B6= as.vector(sapply(colnames(B6_bio_rep_exp),function(x){strsplit(x,"_0")[[1]][[1]]}))
+#cell_line_rep_B6 = 
+#as.vector(sapply(bio_reps,                          function(x){y=strsplit(x,"_")[[1]];paste0(y[[3]])}))
+```
+
+Perform differential expression analysis on B6 RNA seq data.
+
+```{r B6_cell_line_effect_DE}
+colData_B6= DataFrame(cell_line_B6=factor(cell_line_B6))
+dds_B6 <- DESeqDataSetFromMatrix(countData = as.data.frame(round(B6_rep_exp_nz)),
+                              colData = colData_B6, design = ~ cell_line_B6)
+dds_B6 <- DESeq(dds_B6)
+res_B6 = results(dds_B6)
+```
+
+##### B6 SVA analysis
+```{r B6_cell_line_effect_DE_SVA}
+dat <- counts(dds_B6, normalized=TRUE)
+head(dat)
+idx <- rowMeans(dat) > 1
+dat <- dat[idx,]
+mod <- model.matrix(~cell_line_B6, colData(dds_B6))
+mod0 <- model.matrix(~ 1, colData(dds_B6))
+svseq_B6 <- svaseq(dat, mod, mod0, n.sv=2)
+ddssva_B6 <- dds_B6
+ddssva_B6$SV1=svseq_B6$sv[,1]
+ddssva_B6$SV2=svseq_B6$sv[,2]
+design(ddssva_B6) <- ~ SV1 + SV2+cell_line_B6
+ddssva_B6 <- DESeq(ddssva_B6)
+res_sva_B6 = results(ddssva_B6)
+par(mfrow=c(1,2))
+pdf("B6_DESEQ_cell_lines_before_SVA.pdf")
+hist(res_B6$pvalue, breaks=50,col="grey", main="B6: Before SVA", xlab="P-value")
+dev.off()
+pdf("B6_DESEQ_cell_lines_after_SVA.pdf")
+hist(res_sva_B6$pvalue, breaks=50,col="grey", main="B6: After SVA",ylim=c(0,6000), xlab="P-value")
+dev.off()
+res_sva_ordered_B6 <- res_sva_B6[order(res_sva_B6$padj),]
+top10_genes= rownames(res_sva_ordered_B6[1:10,])
+top10_genes
+#for (i in 1:length(top10_genes)){
+for (i in 1:4){
+  pdf(paste0("B6_cell_line_DE_top",toString(i),".pdf"))
+  g_id = top10_genes[i]
+  g_id
+  g_name = get_gene_name(g_id,gene_info)
+  g_info = get_gene_info(g_id,gene_info)
+  #print(g_info)
+  data <- plotCounts(ddssva_B6, gene=g_id, intgroup=c("cell_line_B6"), returnData=TRUE)
+  p <- ggplot(data, aes(x=cell_line_B6  , y=count, color=cell_line_B6)) 
+  p <- p+ ggtitle(paste0("B6: ",g_info))
+  p <- p+ geom_point(position=position_jitter(width=.1,height=0), size=5)
+  print(p)
+  dev.off()
+}  
+top500_genes_B6= rownames(res_sva_ordered_B6[1:500,])
+head(top500_genes_B6)
+head(dat)
+B6_e_mat = log2(as.matrix(dat)+1)
+B6_pca_obj = prcomp(t(B6_e_mat))
+B6_pca_df = data.frame(PC1=B6_pca_obj$x[,1], PC2=B6_pca_obj$x[,2],cell_line=cell_line_B6)
+print(head(B6_pca_df))
+pdf("B6_cell_line_reps.pdf",width=10,height=8)
+ggplot(B6_pca_df,aes(PC1,PC2,color=cell_line_B6))+geom_point(size=5)+
+   theme(axis.text=element_text(size=15),
+         axis.title=element_text(size=15,face="bold"))
+dev.off()
+
+PoV <- B6_pca_obj$sdev^2/sum(B6_pca_obj$sdev^2)
+var_exp_B6 = data.frame(PC=seq(length(PoV)),variance_explained=PoV)
+dim(var_exp_B6)
+par(mfrow=c(1,1))
+
+pdf("B6_percent_variance_explained.pdf",width=8,height=6)
+pca_plot <- ggplot(var_exp_B6,aes(x = PC,y=variance_explained)) + geom_bar(stat = "identity")
+pca_plot <- pca_plot+xlab("Principal Components")+ylab("Percent Variance Explained")
+pca_plot <- pca_plot+theme(axis.text=element_text(size=15),
+                             axis.title=element_text(size=15,face="bold"))
+print(pca_plot)
+dev.off()
+B6_cell_lines= as.vector(sapply(cell_line_B6,function(x){strsplit(x,"_")[[1]][[2]]}))
+cor(as.numeric(as.factor(B6_cell_lines)),as.numeric(B6_pca_obj$x[,1]))
+cor(as.numeric(as.factor(B6_cell_lines)),as.numeric(B6_pca_obj$x[,2]))
+plot(as.factor(B6_cell_lines),as.numeric(B6_pca_obj$x[,2]))
+plot(as.factor(B6_cell_lines),as.numeric(B6_pca_obj$x[,1]))
+plot(as.factor(B6_cell_lines),as.numeric(B6_pca_obj$x[,3]))
+```
+
+### Effect of Cell Lines on NOD
+```{r NOD_cell_line_effect}
+NOD_ind = which(exp_design$strain=="NOD")
+NOD_exp=all_exp[,-(1:6)][,NOD_ind]
+rownames(NOD_exp)=as.vector(all_exp$Gene_ID)
+
+#### replace dot in colnames
+NOD_bio_reps=gsub("\\.1","",colnames(NOD_exp))
+NOD_bio_reps=gsub("\\.2","",NOD_bio_reps)
+NOD_bio_reps=gsub("\\.3","",NOD_bio_reps)
+NOD_bio_reps
+#### collapse techincal replicates in NOD expression
+NOD_bio_rep_exp = t(apply(NOD_exp,1, function(x){aggregate(as.numeric(x), by=list(NOD_bio_reps),FUN=sum)$x}))
+head(NOD_bio_rep_exp)
+colnames(NOD_bio_rep_exp)=aggregate(as.numeric(NOD_exp[1,]), by=list(NOD_bio_reps),FUN=sum)$Group.1
+head(NOD_bio_rep_exp)
+thres=100
+nzIndex_NOD = as.vector(which(apply(NOD_bio_rep_exp,1,function(x){sum(x>thres)/length(x)})>=0.33))
+NOD_rep_exp_nz= B6_bio_rep_exp[nzIndex_NOD,]
+dim(NOD_rep_exp_nz)
+colnames(NOD_bio_rep_exp)
+head(NOD_rep_exp_nz)
+cell_line_NOD= as.vector(sapply(colnames(NOD_bio_rep_exp),function(x){strsplit(x,"_0")[[1]][[1]]}))
+cell_line_NOD
+colData_NOD= DataFrame(cell_line_NOD=factor(cell_line_NOD))
+dds_NOD <- DESeqDataSetFromMatrix(countData = as.data.frame(round(NOD_rep_exp_nz)),
+                              colData = colData_NOD, design = ~ cell_line_NOD)
+dds_NOD <- DESeq(dds_NOD)
+res_NOD = results(dds_NOD)
+dat_NOD <- counts(dds_NOD, normalized=TRUE)
+head(dat)
+idx <- rowMeans(dat_NOD) > 1
+dat_NOD <- dat_NOD[idx,]
+mod <- model.matrix(~cell_line_NOD, colData(dds_NOD))
+mod0 <- model.matrix(~ 1, colData(dds_NOD))
+svseq_NOD <- svaseq(dat_NOD, mod, mod0, n.sv=2)
+ddssva_NOD <- dds_NOD
+ddssva_NOD$SV1=svseq_NOD$sv[,1]
+ddssva_NOD$SV2=svseq_NOD$sv[,2]
+design(ddssva_NOD) <- ~ SV1 + SV2+cell_line_NOD
+ddssva_NOD <- DESeq(ddssva_NOD)
+res_sva_NOD = results(ddssva_NOD)
+par(mfrow=c(1,1))
+pdf("NOD_DESEQ_cell_lines_before_SVA.pdf")
+hist(res_NOD$pvalue, breaks=50,col="grey", main="NOD: Before SVA", xlab="P-value")
+dev.off()
+pdf("NOD_DESEQ_cell_lines_after_SVA.pdf")
+hist(res_sva_NOD$pvalue, breaks=50,col="grey", ylim=c(0,6500),main="NOD: After SVA", xlab="P-value")
+dev.off()
+res_sva_ordered_NOD <- res_sva_NOD[order(res_sva_NOD$padj),]
+top10_genes= rownames(res_sva_ordered_NOD[1:10,])
+top500_genes_NOD= rownames(res_sva_ordered_NOD[1:500,])
+top10_genes
+i =1
+for (i in 1:length(top10_genes)){
+  par(mfrow=c(2,2))
+  g_id = top10_genes[i]
+  g_id
+  g_name = get_gene_name(g_id,gene_info)
+  g_info = get_gene_info(g_id,gene_info)
+  #print(g_info)
+  data <- plotCounts(ddssva_NOD, gene=g_id, intgroup=c("cell_line_NOD"), returnData=TRUE)
+  p <- ggplot(data, aes(x=cell_line_NOD, y=count, color=cell_line_NOD)) 
+  p <- p+ ggtitle(paste0("NOD: ",g_info))
+  p <- p+ geom_point(position=position_jitter(width=.1,height=0), size=3)
+  print(p)
+}  
+head(dat)
+NOD_e_mat = log2(as.matrix(dat_NOD)+1)
+NOD_pca_obj = prcomp(t(NOD_e_mat))
+NOD_pca_df = data.frame(PC1=NOD_pca_obj$x[,1], PC2=NOD_pca_obj$x[,2],cell_line=cell_line_NOD)
+print(head(NOD_pca_df))
+pdf("NOD_cell_line_reps.pdf",width=10,height=8)
+ggplot(NOD_pca_df,aes(PC1,PC2,color=cell_line_NOD))+geom_point(size=5)+
+   theme(axis.text=element_text(size=15),
+         axis.title=element_text(size=15,face="bold"))+theme(axis.text=element_text(size=20),
+         axis.title=element_text(size=20,face="bold"))
+dev.off()
+head(NOD_rep_exp_nz)
+head(B6_rep_exp_nz)
+B6_NOD_rep_exp = merge(B6_rep_exp_nz,NOD_rep_exp_nz,by=0,all=TRUE)
+head(B6_NOD_rep_exp)
+colnames(B6_NOD_rep_exp)
+mergedData <- merge(NOD_rep_exp_nz, B6_rep_exp_nz,by=0)
+colnames(mergedData)
+colnames(B6_rep_exp_nz)
+as.numeric(mergedData[1,])
+as.numeric(B6_rep_exp_nz[1,])
+as.numeric(NOD_rep_exp_nz[1,])
+```
+
+```{r PWD_cell_line_effect}
+PWD_ind = which(exp_design$strain=="PWD")
+PWD_exp=all_exp[,-(1:6)][,PWD_ind]
+rownames(PWD_exp)=as.vector(all_exp$Gene_ID)
+#### replace dot in colnames
+PWD_bio_reps=gsub("\\.1","",colnames(PWD_exp))
+PWD_bio_reps=gsub("\\.2","",PWD_bio_reps)
+PWD_bio_reps=gsub("\\.3","",PWD_bio_reps)
+PWD_bio_reps
+#### collapse techincal replicates in PWD expression
+PWD_bio_rep_exp = t(apply(PWD_exp,1, function(x){aggregate(as.numeric(x), by=list(PWD_bio_reps),FUN=sum)$x}))
+head(PWD_bio_rep_exp)
+colnames(PWD_bio_rep_exp)=aggregate(as.numeric(PWD_exp[1,]), by=list(PWD_bio_reps),FUN=sum)$Group.1
+head(PWD_bio_rep_exp)
+thres=100
+nzIndex_PWD = as.vector(which(apply(PWD_bio_rep_exp,1,function(x){sum(x>thres)/length(x)})>=0.33))
+PWD_rep_exp_nz= PWD_bio_rep_exp[nzIndex_PWD,]
+dim(PWD_rep_exp_nz)
+colnames(PWD_bio_rep_exp)
+head(PWD_rep_exp_nz)
+cell_line_PWD= as.vector(sapply(colnames(PWD_bio_rep_exp),function(x){strsplit(x,"_0")[[1]][[1]]}))
+cell_line_PWD
+colData_PWD= DataFrame(cell_line_PWD=factor(cell_line_PWD))
+dds_PWD <- DESeqDataSetFromMatrix(countData = as.data.frame(round(PWD_rep_exp_nz)),
+                                  colData = colData_PWD, design = ~ cell_line_PWD)
+dds_PWD <- DESeq(dds_PWD)
+res_PWD = results(dds_PWD)
+dat_PWD <- counts(dds_PWD, normalized=TRUE)
+head(dat)
+idx <- rowMeans(dat_PWD) > 1
+dat_PWD <- dat_PWD[idx,]
+mod <- model.matrix(~cell_line_PWD, colData(dds_PWD))
+mod0 <- model.matrix(~ 1, colData(dds_PWD))
+svseq_PWD <- svaseq(dat_PWD, mod, mod0, n.sv=2)
+ddssva_PWD <- dds_PWD
+ddssva_PWD$SV1=svseq_PWD$sv[,1]
+ddssva_PWD$SV2=svseq_PWD$sv[,2]
+design(ddssva_PWD) <- ~ SV1 + SV2+cell_line_PWD
+ddssva_PWD <- DESeq(ddssva_PWD)
+res_sva_PWD = results(ddssva_PWD)
+par(mfrow=c(1,2))
+pdf("PWD_DESEQ_cell_lines_before_SVA.pdf")
+hist(res_PWD$pvalue, breaks=50,col="grey", main="PWD: Before SVA", xlab="P-value")
+dev.off()
+pdf("PWD_DESEQ_cell_lines_after_SVA.pdf")
+hist(res_sva_PWD$pvalue, breaks=50,col="grey",ylim=c(0,6000), main="PWD: After SVA", xlab="P-value")
+dev.off()
+res_sva_ordered_PWD <- res_sva_PWD[order(res_sva_PWD$padj),]
+top10_genes= rownames(res_sva_ordered_PWD[1:10,])
+top500_genes_PWD= rownames(res_sva_ordered_PWD[1:500,])
+top10_genes
+length(intersect(top500_genes_PWD,top500_genes_NOD))
+length(intersect(top500_genes_PWD,top500_genes_B6))
+length(intersect(top500_genes_NOD,top500_genes_B6))
+i =1
+for (i in 1:length(top10_genes)){
+  par(mfrow=c(2,2))
+  g_id = top10_genes[i]
+  g_id
+  g_name = get_gene_name(g_id,gene_info)
+  g_info = get_gene_info(g_id,gene_info)
+  #print(g_info)
+  data <- plotCounts(ddssva_PWD, gene=g_id, intgroup=c("cell_line_PWD"), returnData=TRUE)
+  p <- ggplot(data, aes(x=cell_line_PWD, y=count, color=cell_line_PWD)) 
+  p <- p+ ggtitle(paste0("PWD: ",g_info))
+  p <- p+ geom_point(position=position_jitter(width=.1,height=0), size=3)
+  print(p)
+}  
+head(dat)
+PWD_e_mat = log2(as.matrix(dat_PWD)+1)
+PWD_pca_obj = prcomp(t(PWD_e_mat))
+PWD_pca_df = data.frame(PC1=PWD_pca_obj$x[,1], PC2=PWD_pca_obj$x[,2],cell_line=cell_line_PWD)
+print(head(PWD_pca_df))
+pdf("PWD_cell_line_reps.pdf",width=10,height=8)
+PWD_plot <- ggplot(PWD_pca_df,aes(PC1,PC2,
+                                color=cell_line_PWD))
+PWD_plot <- PWD_plot + geom_point(size=5)
+PWD_plot <- PWD_plot 
+PWD_plot <- PWD_plot + theme(axis.text=element_text(size=15),
+        axis.title=element_text(size=15,face="bold"))
+PWD_plot <- PWD_plot+theme(axis.text=element_text(size=20),                     axis.title=element_text(size=20,face="bold"))
+print(PWD_plot)
+dev.off()
+```
+```{r B6_NOD_PWD_cell_line_effect}
+all_names=gsub("\\.1","",colnames(all_exp[,-(1:6)]))
+all_names=gsub("\\.2","",all_names)
+all_names=gsub("\\.3","",all_names)
+all_names=gsub("X","",all_names)
+all_names
+all(as.vector(exp_design$sampleID)==all_names)
+BNP_ind = c(grep("B6",all_names),grep("NOD",all_names),grep("PWD",all_names))
+BNP_ind
+BNP_exp=all_exp[,-(1:6)][,BNP_ind]
+rownames(BNP_exp)=as.vector(all_exp$Gene_ID)
+colnames(BNP_exp)=all_names[BNP_ind]
+colnames(BNP_exp)
+head(BNP_exp)
+BNP_bio_exp = t(apply(BNP_exp,1, function(x){
+  aggregate(as.numeric(x),by=list(colnames(BNP_exp)),
+            FUN=sum)$x}))
+colnames(BNP_bio_exp)=  aggregate(as.numeric(BNP_exp[1,]), by=list(colnames(BNP_exp)),FUN=sum)$Group.1
+dim(BNP_bio_exp)
+head(BNP_bio_exp)
+thres=200
+nzIndex_BNP = as.vector(which(apply(BNP_bio_exp,1,
+                                    function(x){sum(x>thres)/length(x)})>=0.33))
+BNP_bio_exp_nz= BNP_bio_exp[nzIndex_BNP,]
+dim(BNP_bio_exp_nz)
+strain_cell_line_BNP = colnames(BNP_bio_exp_nz)
+strain_cell_line_BNP
+strain= as.vector(sapply(strain_cell_line_BNP,
+                         function(x){strsplit(x,"_")[[1]][[1]]}))
+strain
+cell_line_BNP= as.vector(sapply(strain_cell_line_BNP,
+                                function(x){y=strsplit(x,"_")[[1]];
+                                paste0(y[[2]],"_",y[[3]])}))
+cell_line_BNP
+cell_lines= as.vector(sapply(strain_cell_line_BNP,
+                                function(x){y=strsplit(x,"_")[[1]];
+                                y[[2]]}))
+cell_lines
+
+dim(BNP_bio_exp_nz)
+BNP_e_mat = log2(as.matrix(BNP_bio_exp_nz)+1)
+BNP_pca_obj = prcomp(t(BNP_e_mat))
+BNP_pca_df = data.frame(PC1=BNP_pca_obj$x[,1], PC2=BNP_pca_obj$x[,2],
+                        strain_cell_line=strain_cell_line_BNP, 
+                        strain=strain,
+                        cell_line=cell_line_BNP)
+print(head(BNP_pca_df))
+pdf("B6_NOD_PWD_cell_line_reps.pdf",width=10,height=8)
+BNP_plot <- ggplot(BNP_pca_df, aes(PC1,PC2,color=strain))
+BNP_plot <- BNP_plot+  geom_point()+theme_bw()
+BNP_plot <- BNP_plot + theme(axis.text=element_text(size=15),
+        axis.title=element_text(size=15,face="bold"))
+print(BNP_plot)
+dev.off()
+PoV <- BNP_pca_obj$sdev^2/sum(BNP_pca_obj$sdev^2)
+var_exp = data.frame(PC=seq(length(PoV)),variance_explained=PoV)
+par(mfrow=c(1,1))
+
+pdf("B6_NOD_PWD_percent_variance_explained.pdf",width=8,height=6)
+pca_plot <- ggplot(var_exp[1:20,],aes(x = PC,y=variance_explained)) + geom_bar(stat = "identity")
+pca_plot <- pca_plot+xlab("Principal Components")+ylab("Percent Variance Explained")
+pca_plot <- pca_plot+theme(axis.text=element_text(size=15),
+                             axis.title=element_text(size=15,face="bold"))
+print(pca_plot)
+dev.off()
+
+cor(BNP_pca_obj$x[,3],as.numeric(as.factor(BNP_pca_df$strain)))
+
+cor(BNP_pca_obj$x[,1],as.numeric(as.factor(BNP_pca_df$strain)))
+plot(as.factor(BNP_pca_df$strain),BNP_pca_obj$x[,1])
+PC1_strain=data.frame(strain=as.factor(BNP_pca_df$strain),PC1=BNP_pca_obj$x[,1])
+head(PC1_strain)
+strain_effect_PC1 <- ggplot(PC1_strain,aes(x=strain,y=PC1,fill=strain)) +geom_boxplot()+geom_point(position=position_jitter(width=0.2))
+strain_effect_PC1 <- strain_effect_PC1 + theme(axis.text=element_text(size=15),
+                             axis.title=element_text(size=15,face="bold"))
+
+print(strain_effect_PC1)
+pdf("strain_effect_on_PC1_BNP.pdf")
+print(strain_effect_PC1)
+dev.off()
+
+cor(BNP_pca_obj$x[,3],as.numeric(as.factor(BNP_pca_df$strain)))
+cor(BNP_pca_obj$x[,2],as.numeric(as.factor(cell_lines)))
+cor(BNP_pca_obj$x[,3],as.numeric(as.factor(cell_lines)))
+
+cell_lines_PC2 = data.frame(cell_lines=as.factor(cell_lines),
+                            PC2=BNP_pca_obj$x[,2],strain=as.factor(BNP_pca_df$strain))
+head(cell_lines_PC2)
+cl_effect_PC2 = ggplot(cell_lines_PC2,aes(x=cell_lines,
+                                      y=PC2,fill=cell_lines)) +geom_boxplot()+geom_point(position=position_jitter(width=0.2))
+cl_effect_PC2 <- cl_effect_PC2 + facet_grid(.~ strain)+ theme(axis.text=element_text(size=15),
+                             axis.title=element_text(size=15,face="bold"))
+print(cl_effect_PC2)
+pdf("cell_line_effect_on_PC2_BNP.pdf",width=10,height=8)
+print(cl_effect_PC2)
+dev.off()
+pdf("cell_line_effect_on_PC2_BNP_v2.pdf",width=10,height=8)
+plot(as.factor(cell_lines),BNP_pca_obj$x[,2],xlab="cell_lines",
+     ylab="PC2")
+dev.off()
+exp_design
+pc1_corr= apply(as.matrix(BNP_bio_exp_nz),1,
+             function(x){cor(BNP_pca_obj$x[,1],x,method="spearman")})
+genes_with_pcor = as.matrix(BNP_bio_exp_nz)[which(pc1_corr > 0.8),]
+head(genes_with_pcor)
+
+dim(genes_with_pcor)
+genes_with_pcor_melt= melt(head(genes_with_pcor))
+head(genes_with_pcor_melt)
+genes_with_ncor = as.matrix(BNP_bio_exp_nz)[which(pc1_corr < -0.8),]
+dim(genes_with_ncor)
+head(genes_with_ncor)
+gene_IDs_with_pncor = c(rownames(genes_with_ncor),
+                        rownames(genes_with_pcor))
+write.table(gene_IDs_with_pncor,"genes_correlated_with_strains_BNP.txt",col.names=FALSE,quote=FALSE,row.names=FALSE)
+plot(as.factor(BNP_pca_df$strain),genes_with_pcor[1,])
+genes_with_ncor[i,]
+rownames(genes_with_ncor)
+as.factor(BNP_pca_df$strain)
+genes_with_ncor[i,]
+for (i in (1:10)){
+  gene_ID = rownames(genes_with_ncor)[i]
+  BNP_df_g= data.frame(strains=as.factor(BNP_pca_df$strain),
+                       exp= as.numeric(genes_with_ncor[i,]))
+  g_plot <- ggplot(BNP_df_g,aes(x=strains,y=exp,fill=strain))+geom_boxplot()
+  g_plot <- g_plot+geom_point(position=position_jitter(width=.1,height=0), size=3) 
+  g_plot <- g_plot+ ggtitle(gene_ID)
+  print(g_plot)
+}
+```
+colnames(exp_with_gene_info)
+head(exp_with_gene_info[1:3,1:10])
+unique(exp_with_gene_info$chr)
+chr19_exp = exp_with_gene_info[exp_with_gene_info$chr=="19",]
+sorted_chr19_exp = chr19_exp[order(chr19_exp$start),]
+PWD_c19_ind= grep("PWD",colnames(sorted_chr19_exp))
+length(PWD_c19_ind)
+colnames(sorted_chr19_exp)
+sorted_chr19_exp[1:5,1:10]
+pwd_c19_exp=sorted_chr19_exp[,PWD_c19_ind]
+head(pwd_c19_exp)
+colnames(pwd_c19_exp)
+pwd_c19_exp_melted=melt(pwd_c19_exp)
+head(pwd_c19_exp_melted)
+p <- ggplot(pwd_c19_exp_melted, aes(factor(variable), value)) 
+p + geom_boxplot() 
+
+mean_ch19_PWD_exp= apply(sorted_chr19_exp[,PWD_c19_ind],1,mean)
+plot(sorted_chr19_exp$start,mean_ch19_PWD_exp)
+sorted_exp_with_gene_info =
+        exp_with_gene_info[order(exp_with_gene_info$chr,exp_with_gene_info$start),]
+head(sorted_exp_with_gene_info[1:3,1:10])
+
+
+```{r B6_NOD_PWD_data}
+colnames(all_exp)
+all8_exp=all_exp[,-(1:6)]
+dim(all8_exp)
+dim(all_exp)
+rownames(all8_exp)=as.vector(all_exp$Gene_ID)
+all8_exp[1:5,1:10]
+#### replace dot in colnames
+bio_reps=gsub("\\.1","",colnames(all8_exp))
+bio_reps=gsub("\\.2","",bio_reps)
+bio_reps=gsub("\\.3","",bio_reps)
+bio_reps=gsub("X","",bio_reps)
+bio_reps
+colnames(all8_exp)
+#### collapse techincal replicates in all 8 strains
+all8_bio_rep_exp = t(apply(all8_exp,1,
+                        function(x){aggregate(as.numeric(x),                                          by=list(bio_reps),FUN=sum)$x}))
+all8_bio_rep_exp[1:5,1:10]
+colnames(all8_bio_rep_exp)=aggregate(as.numeric(all8_exp[1,]), by=list(bio_reps),FUN=sum)$Group.1
+head(all8_bio_rep_exp[1:5,1:10])
+colnames(all8_bio_rep_exp)
+thres=200
+nzIndex_all8 = as.vector(which(apply(all8_bio_rep_exp,1,function(x){sum(x>thres)/length(x)})>=1/8))
+all8_rep_exp_nz= all8_bio_rep_exp[nzIndex_all8,]
+dim(all8_rep_exp_nz)
+all8_mat = log10(as.matrix(all8_rep_exp_nz)+1)
+all8_pca_obj = prcomp(t(all8_mat))
+
+cell_lines=as.vector(sapply(colnames(all8_rep_exp_nz),
+                  function(x){y=strsplit(x,"_")[[1]];
+                  paste0(y[1],"_",y[2])}))
+cell_lines
+strains=as.vector(sapply(colnames(all8_rep_exp_nz),
+                  function(x){y=strsplit(x,"_")[[1]];
+                  paste0(y[1])}))
+strains
+all8_pca_df = data.frame(PC1=all8_pca_obj$x[,1],
+                         PC2=all8_pca_obj$x[,2],
+                strains=strains, cell_lines=cell_lines)
+head(all8_pca_df)
+pdf("all8_PCA_before_batch_correction.pdf",width=9,height=8) 
+    ggplot(all8_pca_df,aes(PC1,PC2,color=strains))+geom_point(size=3.5)+
+   theme(axis.text=element_text(size=15),
+         axis.title=element_text(size=15,face="bold"))
+dev.off()
+t
+ggplot(all8_pca_df,aes(PC1,PC2,color=cell_lines))+geom_point(size=3)+
+   theme(axis.text=element_text(size=15),
+         axis.title=element_text(size=15,face="bold"))
+
+pdf("PC1_vs_strains_before_batch_correction.pdf")
+plot(all8_pca_df$strains,all8_pca_df$PC1, main="before batch correction")
+dev.off()
+plot(all8_pca_df$strains,all8_pca_df$PC2)
+all8_pca_df$PC1
+my_lm=lm(all8_mat[1,]~all8_pca_df$PC1)
+hist(my_lm$residuals)
+exp_no_batch = t(apply(all8_mat,1,function(y){
+      lm_obj=lm(y~all8_pca_df$PC1);
+      lm_obj$residuals}))
+dim(exp_no_batch )
+
+all8_no_batch_pca= prcomp(t(exp_no_batch))
+
+all8_no_batch_pca_df = data.frame(PC1=all8_no_batch_pca$x[,1],
+                         PC2=all8_no_batch_pca$x[,2],
+                strains=strains, cell_lines=cell_lines)
+pdf("all8_PCA_after_batch_correction.pdf", width=9,height=8)
+ggplot(all8_no_batch_pca_df,
+        aes(PC1,PC2,color=strains))+geom_point(size=3.5)+
+   theme(axis.text=element_text(size=15),
+         axis.title=element_text(size=15,face="bold"))
+dev.off()
+
+pdf("PC1_vs_strains_after_batch_correction.pdf")
+plot(all8_no_batch_pca_df$strains,all8_no_batch_pca_df$PC1,main="after batch correction")
+dev.off()
+dim(all8_mat)
+#B6_exp[1:5,1:5]
+#colnames(B6_exp)
+#exp_design$sampleID
+#B6_NOD_PWD_exp[1:5,1:5]
+#e_mat = log10(as.matrix(B6_NOD_PWD_exp)+1)
+#pca_obj = prcomp(t(e_mat))
+#cell_lines=B6_NOD_PWD_design$cell_line
+#strains=B6_NOD_PWD_design$strain
+#pca_df = data.frame(PC1=pca_obj$x[,1], PC2=pca_obj$x[,2],
+#                    strains=strains, cell_lines=cell_lines)
+#print(head(pca_df))
+#par(mfrow=c(1,2))
+#ggplot(pca_df,aes(PC1,PC2,color=strains))+geom_point(size=3)+
+#   theme(axis.text=element_text(size=15),
+#         axis.title=element_text(size=15,face="bold"))
+#ggplot(pca_df,aes(PC1,PC2,color=cell_lines))+geom_point(size=3)+
+#   theme(axis.text=element_text(size=15),
+#         axis.title=element_text(size=15,face="bold"))
+```
+
+Exploratory analysis of the expression data using PCA to see similarities and differences between the cell lines and strains.
+```{r pca_exp}
+# The palette with black:
+#cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+#e_mat = log2(as.matrix(exp_nz)+1)
+#pca_obj = prcomp(t(e_mat))
+#cell_lines=exp_design$cell_line
+#pca_df = data.frame(PC1=pca_obj$x[,1], PC2=pca_obj$x[,2],strains=strains, cell_lines=cell_lines)
+#print(head(pca_df))
+#ggplot(pca_df,aes(PC1,PC2,color=strains))+geom_point(size=3)+
+#   theme(axis.text=element_text(size=15),
+#         axis.title=element_text(size=15,face="bold"))
+#ggplot(pca_df,aes(PC1,PC2,color=cell_lines))+geom_point(size=3)+
+#   theme(axis.text=element_text(size=15),
+#         axis.title=element_text(size=15,face="bold"))+ scale_fill_brewer()
+```
+```{r DESEQ2_1}
+#colData <- DataFrame(strains = factor(strains))
+### Create DESeq2 object using expression and colData
+#dds <- DESeqDataSetFromMatrix(countData = as.data.frame(round(exp_nz)),
+#                              colData = colData, 
+#                              design = ~ strains)
+#dds <- DESeq(dds)
+#res = results(dds)
+#print(colData(dds))
+#print(summary(res))
+#res_ordered <- res[order(res$padj),]
+#print(head(res_ordered))
+```
+
+
