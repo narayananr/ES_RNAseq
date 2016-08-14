@@ -1,0 +1,180 @@
+---
+title: "trisomy RNA-seq analysis by edgeR"
+author: "Narayanan Raghupathy"
+date: "Aug 10, 2016"
+output: html_document
+---
+
+### R Libraries and Data Import
+The R packages and needed for the differential expression analysis by DESEQ2 and heatmap analysis.
+```{r R_package, results='hide', message=FALSE, warning=FALSE}
+library("DESeq2")
+library(edgeR)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(knitr)
+library(sva)
+library("AnnotationDbi")
+library("org.Mm.eg.db")
+library(pathview)
+library(gage)
+library(gageData)
+library(pheatmap)
+library(VennDiagram)
+```
+
+Load the quantified expression data and the experimental design for the B6,NOD, and PWD ES Cell RNA-seq data.
+
+```{r data}
+exp= read.table("~/Work/Projects/Laura/trisomy/trisomy_RNAseq_R84-REL1505_EMASE_pe_counts.tsv",header=TRUE)
+genes= as.vector(exp$gene_id)
+exp=exp[,-1]
+rownames(exp)=genes
+exp_design = read.table("~/Work/Projects/Laura/trisomy/trisomy_exp_design.tsv", header=TRUE)
+#print(head(exp_design))
+thres= 500 
+exp_nz = exp[rowSums(exp)>thres,]
+print(dim(exp_nz))
+print(head(exp_nz))
+print(exp_design)
+print(all(colnames(exp_nz)==as.vector(exp_design$sample_ID)))
+gene_info=read.table("~/Work/Projects/Laura/trisomy/ENSMUSG-gene-info-R84.tsv", header=F)
+colnames(gene_info)=c("gene_id","gene_name","chr","strand","start","end")
+head(gene_info)
+group=paste0(exp_design$genotype,"_",exp_design$parental_origin)
+```
+
+```{r edger_analysis_prep}
+### edgeR object
+print(group)
+y <- DGEList(counts=exp_nz,group=group)
+y <- calcNormFactors(y)
+design <- model.matrix(~group)
+design
+y <- estimateDisp(y,design)
+str(y)
+nc <- cpm(y, normalized.lib.sizes=FALSE)
+head(nc)
+### To perform quasi-likelihood F-tests:
+fit <- glmQLFit(y,design)
+qlf <- glmQLFTest(fit,coef=2)
+topTags(qlf)
+### To perform likelihood-ratio tests:
+fit <- glmFit(y,design)
+lrt <- glmLRT(fit,coef=2)
+topTags(lrt)
+y$samples
+levels(y$samples$group)
+as.numeric(as.factor(group))
+```
+
+DE analysis **Trisomy** vs **Control** adjusting for parental origin
+------------------------------------------
+```{r edger_analysis_Trisomy_vs_Control}
+print(head(exp_design))
+p_origin= as.factor(exp_design$parental_origin)
+p_origin
+genotype= as.factor(exp_design$genotype)
+design_TvC =model.matrix(~p_origin+genotype)
+design_TvC
+rownames(design_TvC)=genotype
+exp_nz[1:5,1:5]
+genotype
+y <- DGEList(counts=exp_nz,group=genotype)
+y$samples
+y <- calcNormFactors(y)
+y <- estimateDisp(y, design_TvC, robust=TRUE)
+str(y)
+
+y$common.dispersion
+plotBCV(y)
+fit <- glmQLFit(y, design_TvC, robust=TRUE)
+plotQLDisp(fit)
+qlf <- glmQLFTest(fit)
+qlf <- glmLRT(fit)
+
+topTags(qlf)
+TvC_results <- topTags(qlf,n=nrow(qlf))$table
+head(TvC_results)
+hist(TvC_results$PValue,breaks=100,col="lightblue",
+     xlab="P-values",main="Trisomy vs Control")
+```
+
+DE analysis **Control_M** vs **Control_P**
+----------------------------------------
+
+```{r edger_analysis_Control_M_vs_P}
+##Control_M vs  Control_P
+#et_Control_MP <- exactTest(y, 
+#                           pair=c("Control_M","Control_P"))
+#y$samples
+###GLM approach
+group
+y <- DGEList(counts=exp_nz,group=group)
+y <- calcNormFactors(y)
+design <- model.matrix(~group)
+design
+y <- estimateDisp(y,design)
+
+design =model.matrix(~0+group,data=y$samples)
+colnames(design) <- levels(y$samples$group)
+head(design)
+fit <- glmFit(y,design)
+lrt_CM_CP <-glmLRT(fit, contrast = c(-1,1,0,0))
+## sort results by pvalue
+lrt_CM_CP_results <- topTags(lrt_CM_CP,n=nrow(lrt_CM_CP))$table
+write.table(rownames(lrt_CM_CP_results[which(lrt_CM_CP_results$FDR<=0.05),]),"~/Work/Projects/Laura/trisomy/Control_MvsP_genes_FDR5.txt",row.names = FALSE,col.names=FALSE)
+write.table()
+hist(lrt_CM_CP_results$PValue,breaks=100,col="lightblue",
+     xlab="P-values",main="Control_M vs Control_P")
+```
+
+DE analysis **Trisomy_M** and **Trisomy_P**
+------------------------------------------
+
+```{r edger_analysis_Trisomy_M_vs_P}
+##Trisomy_P vs  Trisomy_M
+lrt_TM_TP <-glmLRT(fit, contrast = c(0,0,-1,1))
+head(lrt_TM_TP$table)
+head(lrt_TM_TP$table$FDR)
+## sort results by pvalue
+lrt_TM_TP_results <- topTags(lrt_TM_TP,
+                             n=nrow(lrt_TM_TP))$table
+hist(lrt_TM_TP_results$PValue,breaks=100, col="lightblue",
+     xlab="P-value",main="Trisomy_M vsTrisomy_P")
+head(lrt_TM_TP_results)
+## sorted bt FDR
+lrt_TM_TP_byPval <- topTags(lrt_TM_TP,n=nrow(lrt_TM_TP),sort.by = "PValue")$table
+head(lrt_TM_TP_byPval)
+#goana(lrt_TM_TP,species="Mm")
+```
+Plot the top genes
+```{r plot_top_genes}
+genes_TM_TP=rownames(lrt_TM_TP_results[lrt_TM_TP_results$FDR <=0.1,])
+TM_TP_sig_exp=nc[which(rownames(nc)%in% genes_TM_TP),]
+i =1
+exp_design$genotype
+all(exp_design$sample_ID==colnames(TM_TP_sig_exp))
+PT_group=paste0(exp_design$genotype,"_",exp_design$parental_origin)
+PT_group
+for (i in 1:length(genes_TM_TP)){
+    g_id= rownames(TM_TP_sig_exp)[i]
+    g_ind = which(gene_info$gene_id==g_id)
+    gName= paste0(as.vector(gene_info$gene_id)[g_ind],"_",
+                as.vector(gene_info$gene_name)[g_ind])
+    gene_loc= paste0(as.vector(gene_info$chr)[g_ind],":",
+                as.vector(gene_info$start)[g_ind])
+    print(gene_loc)
+    exp_data <- data.frame(exp=TM_TP_sig_exp[i,],group=PT_group)
+    print(head(exp_data))
+    p <- ggplot(exp_data,aes(x=group,
+          y=exp,color=exp_design$genotype)) 
+    p <- p+ ggtitle(paste0(gName,"\n",gene_loc))
+    p <- p+ geom_point(position=
+            position_jitter(width=.1,height=0), size=3)
+    print(p)
+}
+
+```
+
